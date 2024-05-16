@@ -63,7 +63,7 @@ public class Overture implements Profile {
       "tile_warning_size_mb", "10"
     )));
     var sample = arguments.getBoolean("sample", "only download smallest file from parquet source", false);
-    var release = arguments.getString("release", "overture release", "2023-10-19-alpha.0");
+    var release = arguments.getString("release", "overture release", "2024-04-16-beta.0");
 
     var pt = Planetiler.create(arguments)
       .addAvroParquetSource("overture", base)
@@ -96,17 +96,7 @@ public class Overture implements Profile {
   public void processFeature(SourceFeature sourceFeature, FeatureCollector features) {
     if (sourceFeature instanceof AvroParquetFeature avroFeature) {
       switch (sourceFeature.getSourceLayer()) {
-        case "admins/administrativeBoundary" -> processAdministrativeBoundary(avroFeature, features);
-        case "admins/locality" -> processLocality(avroFeature, features);
-        case "admins/localityArea" -> processLocalityArea(avroFeature, features);
-        case "buildings/building", "buildings/part" -> processBuilding(avroFeature, features);
-        case "places/place" -> processPlace(avroFeature, features);
-        case "transportation/connector" -> processConnector(avroFeature, features);
-        case "transportation/segment" -> processSegment(avroFeature, features);
-        case "base/land" -> processLand(avroFeature, features);
-        case "base/landUse" -> processLandUse(avroFeature, features);
-        case "base/water" -> processWater(avroFeature, features);
-        default -> System.err.println("Not handled: " + sourceFeature.getSourceLayer());
+        case "buildings/building", "buildings/building_part" -> processBuilding(avroFeature, features);
       }
     }
   }
@@ -254,6 +244,8 @@ public class Overture implements Profile {
       .trim();
   }
 
+  private void processInfrastructure(AvroParquetFeature sourceFeature, FeatureCollector features) {
+  }
 
   private void processSegment(AvroParquetFeature sourceFeature, FeatureCollector features) {
     Struct struct = sourceFeature.getStruct();
@@ -525,24 +517,25 @@ public class Overture implements Profile {
       Struct struct = sourceFeature.getStruct();
       var commonTags = getCommonTags(struct);
       commonTags.put("class", struct.get("class").asString());
+      commonTags.put("subtype", struct.get("subtype").asString());
       var feature = features.polygon(sourceFeature.getSourceLayer())
-        .setMinZoom(13)
-        .setMinPixelSize(2)
+        .setMinZoom(11)
+        .setMinPixelSize(1)
         .putAttrs(commonTags)
         .setAttr("height", struct.get("height").asDouble())
-        .setAttr("numFloors", struct.get("numFloors").asInt())
-        .setAttr("roofShape", struct.get("roofShape").asString())
-        .setAttr("roofOrientation", struct.get("roofOrientation").asString())
-        .setAttr("roofDirection", struct.get("roofDirection").asDouble())
-        .setAttr("eaveHeight", struct.get("eaveHeight").asDouble())
-        .setAttr("roofMaterial", struct.get("roofMaterial").asString())
-        .setAttr("facadeMaterial", struct.get("facadeMaterial").asString())
-        .setAttr("facadeColor", struct.get("facadeColor").asString())
-        .setAttr("roofColor", struct.get("roofColor").asString())
-        .setAttr("buildingId", struct.get("buildingId").asString());
-      if (Boolean.TRUE.equals(struct.get("hasParts").asBoolean())) {
-        feature.setAttr("hasParts", true)
-          .setAttr("id", struct.get("id").asString());
+        .setAttr("min_height", struct.get("min_height").asDouble())
+        .setAttr("num_floors", struct.get("num_floors").asInt())
+        .setAttr("min_floor", struct.get("min_floor").asInt())
+        .setAttr("roof_shape", struct.get("roof_shape").asString())
+        .setAttr("roof_orientation", struct.get("roof_orientation").asString())
+        .setAttr("roof_direction", struct.get("roof_direction").asDouble())
+        .setAttr("eave_height", struct.get("eave_height").asDouble())
+        .setAttr("roof_material", struct.get("roof_material").asString())
+        .setAttr("facade_material", struct.get("facade_material").asString())
+        .setAttr("facade_color", struct.get("facade_color").asString())
+        .setAttr("roof_color", struct.get("roof_color").asString());
+      if (Boolean.TRUE.equals(struct.get("has_parts").asBoolean())) {
+        feature.setAttr("has_parts", true);
       }
       var names = getNames(struct.get("names"));
       if (!names.isEmpty()) {
@@ -613,7 +606,7 @@ public class Overture implements Profile {
     Map<String, Object> results = HashMap.newHashMap(4);
     if (metadata) {
       results.put("version", info.get("version").asInt());
-      results.put("updateTime", Instant.ofEpochMilli(info.get("updatetime").asLong()).toString());
+      results.put("update_time", Instant.ofEpochMilli(info.get("update_time").asLong()).toString());
     }
     if (ids) {
       results.put("id", ZoomFunction.minZoom(14, info.get("id").asString()));
