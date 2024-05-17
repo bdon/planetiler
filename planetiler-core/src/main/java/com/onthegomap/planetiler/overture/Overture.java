@@ -58,7 +58,7 @@ public class Overture implements Profile {
   }
 
   public static void main(String[] args) throws Exception {
-    var base = Path.of("data", "sources", "overture-12-23-ma");
+    var base = Path.of("data", "sources", "overture-2024-04-16-beta.0");
     var arguments = Arguments.fromEnvOrArgs(args).orElse(Arguments.of(Map.of(
       "tile_warning_size_mb", "10"
     )));
@@ -242,6 +242,11 @@ public class Overture implements Profile {
       """
       .replaceAll("\n", " ")
       .trim();
+  }
+
+  @Override
+  public boolean isOverlay() {
+    return false;
   }
 
   private void processInfrastructure(AvroParquetFeature sourceFeature, FeatureCollector features) {
