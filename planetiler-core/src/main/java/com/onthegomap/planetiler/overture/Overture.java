@@ -246,7 +246,7 @@ public class Overture implements Profile {
 
   @Override
   public boolean isOverlay() {
-    return false;
+    return true;
   }
 
   private void processInfrastructure(AvroParquetFeature sourceFeature, FeatureCollector features) {
