@@ -26,7 +26,7 @@ class TileSizeStatsTest {
   }
 
   @Test
-  void computeStatsOneFeature() throws IOException {
+  void computeStatsOneFeature() {
     var stats = TileSizeStats.computeTileStats(new VectorTile()
       .addLayerFeatures("layer", List.of(new VectorTile.Feature(
         "layer",
@@ -45,18 +45,14 @@ class TileSizeStatsTest {
     assertEquals(2, entry1.layerAttrKeys());
     assertEquals(2, entry1.layerAttrValues());
 
-    var formatted = TileSizeStats.newThreadLocalSerializer().formatOutputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
-    assertEquals(
-      """
-        z	x	y	hilbert	archived_tile_bytes	layer	layer_bytes	layer_features	layer_geometries	layer_attr_bytes	layer_attr_keys	layer_attr_values
-        3	1	2	34	999	layer	55	1	1	18	2	2
-        """
-        .trim(),
-      (TileSizeStats.headerRow() + String.join("", formatted)).trim());
+    var rows = TileSizeStats.outputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
+    assertEquals(List.of(
+      new TileSizeStats.OutputRow(3, 1, 2, 34, 999, "layer", 55, 1, 1, 18, 2, 2)
+    ), rows);
   }
 
   @Test
-  void computeStats2Features() throws IOException {
+  void computeStats2Features() {
     var stats = TileSizeStats.computeTileStats(new VectorTile()
       .addLayerFeatures("b", List.of(
         new VectorTile.Feature(
@@ -94,15 +90,11 @@ class TileSizeStatsTest {
     assertEquals("b", entry2.layer());
     assertEquals(1, entry2.layerFeatures());
 
-    var formatted = TileSizeStats.newThreadLocalSerializer().formatOutputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
-    assertEquals(
-      """
-        z	x	y	hilbert	archived_tile_bytes	layer	layer_bytes	layer_features	layer_geometries	layer_attr_bytes	layer_attr_keys	layer_attr_values
-        3	1	2	34	999	a	72	2	2	20	2	3
-        3	1	2	34	999	b	19	1	1	0	0	0
-        """
-        .trim(),
-      (TileSizeStats.headerRow() + String.join("", formatted)).trim());
+    var rows = TileSizeStats.outputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
+    assertEquals(List.of(
+      new TileSizeStats.OutputRow(3, 1, 2, 34, 999, "a", 72, 2, 2, 20, 2, 3),
+      new TileSizeStats.OutputRow(3, 1, 2, 34, 999, "b", 19, 1, 1, 0, 0, 0)
+    ), rows);
   }
 
   @Test
@@ -151,15 +143,11 @@ class TileSizeStatsTest {
     assertEquals("b", entry2.layer());
     assertEquals(1, entry2.layerFeatures());
 
-    var formatted = TileSizeStats.newThreadLocalSerializer().formatOutputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
-    assertEquals(
-      """
-        z	x	y	hilbert	archived_tile_bytes	layer	layer_bytes	layer_features	layer_geometries	layer_attr_bytes	layer_attr_keys	layer_attr_values
-        3	1	2	34	999	a	85	2	2	41	2	3
-        3	1	2	34	999	b	25	1	1	0	0	0
-        """
-        .trim(),
-      (TileSizeStats.headerRow() + String.join("", formatted)).trim());
+    var rows = TileSizeStats.outputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
+    assertEquals(List.of(
+      new TileSizeStats.OutputRow(3, 1, 2, 34, 999, "a", 85, 2, 2, 41, 2, 3),
+      new TileSizeStats.OutputRow(3, 1, 2, 34, 999, "b", 25, 1, 1, 0, 0, 0)
+    ), rows);
   }
 
   @Test
@@ -211,13 +199,9 @@ class TileSizeStatsTest {
     assertEquals(2, entry1.layerAttrKeys());
     assertEquals(2, entry1.layerAttrValues());
 
-    var formatted = TileSizeStats.newThreadLocalSerializer().formatOutputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
-    assertEquals(
-      """
-        z	x	y	hilbert	archived_tile_bytes	layer	layer_bytes	layer_features	layer_geometries	layer_attr_bytes	layer_attr_keys	layer_attr_values
-        3	1	2	34	999	a	95	2	2	50	2	2
-        """
-        .trim(),
-      (TileSizeStats.headerRow() + String.join("", formatted)).trim());
+    var rows = TileSizeStats.outputRows(TileCoord.ofXYZ(1, 2, 3), 999, stats);
+    assertEquals(List.of(
+      new TileSizeStats.OutputRow(3, 1, 2, 34, 999, "a", 95, 2, 2, 50, 2, 2)
+    ), rows);
   }
 }

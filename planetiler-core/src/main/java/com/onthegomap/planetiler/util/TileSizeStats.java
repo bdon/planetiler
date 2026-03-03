@@ -2,12 +2,7 @@ package com.onthegomap.planetiler.util;
 
 import static com.onthegomap.planetiler.worker.Worker.joinFutures;
 
-import com.fasterxml.jackson.annotation.JsonPropertyOrder;
-import com.fasterxml.jackson.databind.ObjectWriter;
-import com.fasterxml.jackson.databind.PropertyNamingStrategies;
-import com.fasterxml.jackson.databind.annotation.JsonNaming;
-import com.fasterxml.jackson.dataformat.csv.CsvMapper;
-import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import blue.strategic.parquet.ParquetWriter;
 import com.google.common.io.CountingInputStream;
 import com.onthegomap.planetiler.VectorTile;
 import com.onthegomap.planetiler.archive.Tile;
@@ -20,15 +15,11 @@ import com.onthegomap.planetiler.stats.ProgressLoggers;
 import com.onthegomap.planetiler.stats.Stats;
 import com.onthegomap.planetiler.worker.WorkQueue;
 import com.onthegomap.planetiler.worker.WorkerPipeline;
-import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.io.OutputStreamWriter;
 import java.io.UncheckedIOException;
-import java.io.Writer;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
@@ -39,6 +30,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import me.lemire.integercompression.IntWrapper;
 import org.apache.commons.lang3.tuple.Pair;
+import org.apache.parquet.schema.LogicalTypeAnnotation;
+import org.apache.parquet.schema.MessageType;
+import org.apache.parquet.schema.PrimitiveType;
+import org.apache.parquet.schema.Types;
 import org.locationtech.jts.geom.Geometry;
 import org.locationtech.jts.geom.GeometryCollection;
 import org.maplibre.mlt.converter.encodings.MltTypeMap;
@@ -57,32 +52,42 @@ import vector_tile.VectorTileProto;
  * Utilities for extracting tile and layer size summaries from encoded vector tiles.
  * <p>
  * {@link #computeTileStats(VectorTileProto.Tile)} extracts statistics about each layer in a tile and
- * {@link TsvSerializer} formats them as row of a TSV file to write.
+ * {@link #writeParquetFile(Path)} creates a Parquet file writer for the output.
  * <p>
- * To generate a tsv.gz file with stats for each tile, you can add {@code --output-layerstats} option when generating an
- * archive, or run the following an existing archive:
+ * To generate a parquet file with stats for each tile, you can add {@code --output-layerstats} option when generating
+ * an archive, or run the following on an existing archive:
  *
  * <pre>
  * {@code
- * java -jar planetiler.jar stats --input=<path to pmtiles or mbtiles> --output=layerstats.tsv.gz
+ * java -jar planetiler.jar stats --input=<path to pmtiles or mbtiles> --output=layerstats.parquet
  * }
  * </pre>
  */
 public class TileSizeStats {
 
   private static final int BATCH_SIZE = 1_000;
-  private static final CsvSchema SCHEMA = new CsvMapper()
-    .schemaFor(OutputRow.class)
-    .withoutHeader()
-    .withColumnSeparator('\t')
-    .withLineSeparator("\n");
+
+  static final MessageType SCHEMA = Types.buildMessage()
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("z")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("x")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("y")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("hilbert")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("archived_tile_bytes")
+    .required(PrimitiveType.PrimitiveTypeName.BINARY).as(LogicalTypeAnnotation.stringType()).named("layer")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("layer_bytes")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("layer_features")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("layer_geometries")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("layer_attr_bytes")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("layer_attr_keys")
+    .required(PrimitiveType.PrimitiveTypeName.INT32).named("layer_attr_values")
+    .named("layerstats");
 
   /** Returns the default path that a layerstats file should go relative to an existing archive. */
   public static Path getDefaultLayerstatsPath(Path archive) {
-    return archive.resolveSibling(archive.getFileName() + ".layerstats.tsv.gz");
+    return archive.resolveSibling(archive.getFileName() + ".layerstats.parquet");
   }
 
-  public static void main(String... args) {
+  public static void main(String... args) throws IOException {
     var arguments = Arguments.fromArgsOrConfigFile(args);
     var config = PlanetilerConfig.from(arguments);
     var stats = Stats.inMemory();
@@ -99,7 +104,7 @@ public class TileSizeStats {
       arguments.file("output", "output file", getDefaultLayerstatsPath(localPath));
     var counter = new AtomicLong(0);
     var timer = stats.startStage("tilestats");
-    record Batch(List<Tile> tiles, CompletableFuture<List<String>> stats) {}
+    record Batch(List<Tile> tiles, CompletableFuture<List<OutputRow>> stats) {}
     WorkQueue<Batch> writerQueue = new WorkQueue<>("tilestats_write_queue", 1_000, 1, stats);
     var pipeline = WorkerPipeline.start("tilestats", stats);
     var readBranch = pipeline
@@ -137,9 +142,8 @@ public class TileSizeStats {
         List<LayerStats> layerStats = null;
 
         var updater = tileStats.threadLocalUpdater();
-        var layerStatsSerializer = TileSizeStats.newThreadLocalSerializer();
         for (var batch : prev) {
-          List<String> lines = new ArrayList<>(batch.tiles.size());
+          List<OutputRow> rows = new ArrayList<>(batch.tiles.size());
           for (var tile : batch.tiles) {
             if (!Arrays.equals(zipped, tile.bytes())) {
               zipped = tile.bytes();
@@ -148,19 +152,18 @@ public class TileSizeStats {
               layerStats = computeTileStats(decoded);
             }
             updater.recordTile(tile.coord(), zipped.length, layerStats);
-            lines.addAll(layerStatsSerializer.formatOutputRows(tile.coord(), zipped.length, layerStats));
+            rows.addAll(outputRows(tile.coord(), zipped.length, layerStats));
           }
-          batch.stats.complete(lines);
+          batch.stats.complete(rows);
         }
       });
 
     var writeBranch = pipeline.readFromQueue(writerQueue)
       .sinkTo("write", 1, prev -> {
-        try (var writer = newWriter(output)) {
-          writer.write(headerRow());
+        try (var writer = writeParquetFile(output)) {
           for (var batch : prev) {
-            for (var line : batch.stats.get()) {
-              writer.write(line);
+            for (var row : batch.stats.get()) {
+              writer.write(row);
             }
           }
         }
@@ -179,50 +182,45 @@ public class TileSizeStats {
     stats.printSummary();
   }
 
-  /** Returns a {@link TsvSerializer} that can be used by a single thread to convert to CSV rows. */
-  public static TsvSerializer newThreadLocalSerializer() {
-    // CsvMapper is not entirely thread safe, and can end up with a BufferRecycler memory leak when writeValueAsString
-    // is called billions of times from multiple threads, so we generate a new instance per serializing thread
-    ObjectWriter writer = new CsvMapper().writer(SCHEMA);
-    return (tileCoord, archivedBytes, layerStats) -> {
-      int hilbert = tileCoord.hilbertEncoded();
-      List<String> result = new ArrayList<>(layerStats.size());
-      for (var layer : layerStats) {
-        result.add(writer.writeValueAsString(new OutputRow(
-          tileCoord.z(),
-          tileCoord.x(),
-          tileCoord.y(),
-          hilbert,
-          archivedBytes,
-          layer.layer,
-          layer.layerBytes,
-          layer.layerFeatures,
-          layer.layerGeometries,
-          layer.layerAttrBytes,
-          layer.layerAttrKeys,
-          layer.layerAttrValues
-        )));
-      }
-      return result;
-    };
+  /** Returns the output rows for all the layers in a tile. */
+  public static List<OutputRow> outputRows(TileCoord tileCoord, int archivedBytes, List<LayerStats> layerStats) {
+    int hilbert = tileCoord.hilbertEncoded();
+    List<OutputRow> result = new ArrayList<>(layerStats.size());
+    for (var layer : layerStats) {
+      result.add(new OutputRow(
+        tileCoord.z(),
+        tileCoord.x(),
+        tileCoord.y(),
+        hilbert,
+        archivedBytes,
+        layer.layer,
+        layer.layerBytes,
+        layer.layerFeatures,
+        layer.layerGeometries,
+        layer.layerAttrBytes,
+        layer.layerAttrKeys,
+        layer.layerAttrValues
+      ));
+    }
+    return result;
   }
 
-  /**
-   * Opens a new gzip (level 1/fast) writer to {@code path}, creating a new one or replacing an existing file at that
-   * path.
-   */
-  public static Writer newWriter(Path path) throws IOException {
-    return new OutputStreamWriter(
-      new FastGzipOutputStream(new BufferedOutputStream(Files.newOutputStream(path,
-        StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.CREATE))));
-  }
-
-  /** Returns the header row for the output TSV file. */
-  public static String headerRow() {
-    return String.join(
-      String.valueOf(SCHEMA.getColumnSeparator()),
-      SCHEMA.getColumnNames()
-    ) + new String(SCHEMA.getLineSeparator());
+  /** Opens a new Parquet file writer to {@code path}. */
+  public static ParquetWriter<OutputRow> writeParquetFile(Path path) throws IOException {
+    return ParquetWriter.writeFile(SCHEMA, path.toFile(), (row, writer) -> {
+      writer.write("z", row.z);
+      writer.write("x", row.x);
+      writer.write("y", row.y);
+      writer.write("hilbert", row.hilbert);
+      writer.write("archived_tile_bytes", row.archivedTileBytes);
+      writer.write("layer", row.layer);
+      writer.write("layer_bytes", row.layerBytes);
+      writer.write("layer_features", row.layerFeatures);
+      writer.write("layer_geometries", row.layerGeometries);
+      writer.write("layer_attr_bytes", row.layerAttrBytes);
+      writer.write("layer_attr_keys", row.layerAttrKeys);
+      writer.write("layer_attr_values", row.layerAttrValues);
+    });
   }
 
   /** Returns the size and statistics for each layer in {@code proto}. */
@@ -364,30 +362,7 @@ public class TileSizeStats {
     }
   }
 
-  @FunctionalInterface
-  public interface TsvSerializer {
-
-    /** Returns the TSV rows to output for all the layers in a tile. */
-    List<String> formatOutputRows(TileCoord tileCoord, int archivedBytes, List<LayerStats> layerStats)
-      throws IOException;
-  }
-
-  /** Model for the data contained in each row in the TSV. */
-  @JsonPropertyOrder({
-    "z",
-    "x",
-    "y",
-    "hilbert",
-    "archived_tile_bytes",
-    "layer",
-    "layer_bytes",
-    "layer_features",
-    "layer_geometries",
-    "layer_attr_bytes",
-    "layer_attr_keys",
-    "layer_attr_values"
-  })
-  @JsonNaming(PropertyNamingStrategies.SnakeCaseStrategy.class)
+  /** Model for the data contained in each row of the layerstats output. */
   public record OutputRow(
     int z,
     int x,

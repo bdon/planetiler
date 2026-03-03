@@ -210,12 +210,11 @@ public class TileArchiveWriter {
 
   private static WorkerPipeline.SinkStep<TileBatch> tileStatsWriter(Path layerStatsPath) {
     return prev -> {
-      try (var statsWriter = TileSizeStats.newWriter(layerStatsPath)) {
-        statsWriter.write(TileSizeStats.headerRow());
+      try (var statsWriter = TileSizeStats.writeParquetFile(layerStatsPath)) {
         for (var batch : prev) {
           for (var encodedTile : batch.out().get()) {
-            for (var line : encodedTile.layerStats()) {
-              statsWriter.write(line);
+            for (var row : encodedTile.layerStats()) {
+              statsWriter.write(row);
             }
           }
         }
@@ -278,7 +277,6 @@ public class TileArchiveWriter {
     boolean lastIsFill = false;
     List<TileSizeStats.LayerStats> lastLayerStats = null;
     boolean skipFilled = config.skipFilledTiles();
-    var layerStatsSerializer = TileSizeStats.newThreadLocalSerializer();
     boolean includeIds = !config.excludeIds();
 
     var tileStatsUpdater = tileStats.threadLocalUpdater();
@@ -371,8 +369,8 @@ public class TileArchiveWriter {
         }
         if (!(skipFilled && lastIsFill) && bytes != null) {
           tileStatsUpdater.recordTile(tileFeatures.tileCoord(), bytes.length, layerStats);
-          List<String> layerStatsRows = config.outputLayerStats() ?
-            layerStatsSerializer.formatOutputRows(tileFeatures.tileCoord(), bytes.length, layerStats) :
+          List<TileSizeStats.OutputRow> layerStatsRows = config.outputLayerStats() ?
+            TileSizeStats.outputRows(tileFeatures.tileCoord(), bytes.length, layerStats) :
             List.of();
           result.add(
             new TileEncodingResult(

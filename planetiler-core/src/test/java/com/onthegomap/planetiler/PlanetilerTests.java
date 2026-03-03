@@ -3,8 +3,7 @@ package com.onthegomap.planetiler;
 import static com.onthegomap.planetiler.TestUtils.*;
 import static org.junit.jupiter.api.Assertions.*;
 
-import com.fasterxml.jackson.dataformat.csv.CsvMapper;
-import com.fasterxml.jackson.dataformat.csv.CsvSchema;
+import blue.strategic.parquet.ParquetReader;
 import com.onthegomap.planetiler.archive.ReadableTileArchive;
 import com.onthegomap.planetiler.archive.TileArchiveConfig;
 import com.onthegomap.planetiler.archive.TileArchiveMetadata;
@@ -36,10 +35,8 @@ import com.onthegomap.planetiler.stats.Stats;
 import com.onthegomap.planetiler.stream.InMemoryStreamArchive;
 import com.onthegomap.planetiler.util.BuildInfo;
 import com.onthegomap.planetiler.util.FunctionThatThrows;
-import com.onthegomap.planetiler.util.Gzip;
 import com.onthegomap.planetiler.util.TileSizeStats;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -2751,54 +2748,30 @@ class PlanetilerTests {
       }
     }
 
-    final Path layerstats = outputPath.resolveSibling(outputPath.getFileName().toString() + ".layerstats.tsv.gz");
+    final Path layerstats = outputPath.resolveSibling(outputPath.getFileName().toString() + ".layerstats.parquet");
     if (args.contains("--output-layerstats")) {
       assertTrue(Files.exists(layerstats));
-      byte[] data = Files.readAllBytes(layerstats);
-      byte[] uncompressed = Gzip.gunzip(data);
-      String[] lines = new String(uncompressed, StandardCharsets.UTF_8).split("\n");
-      assertEquals(33, lines.length);
 
-      assertEquals(List.of(
-        "z",
-        "x",
-        "y",
-        "hilbert",
-        "archived_tile_bytes",
-        "layer",
-        "layer_bytes",
-        "layer_features",
-        "layer_geometries",
-        "layer_attr_bytes",
-        "layer_attr_keys",
-        "layer_attr_values"
-      ), List.of(lines[0].split("\t")), lines[0]);
+      var rows = readParquetLayerstats(layerstats);
+      assertEquals(32, rows.size());
 
-      var mapper = new CsvMapper();
-      var reader = mapper
-        .readerFor(Map.class)
-        .with(CsvSchema.emptySchema().withColumnSeparator('\t').withLineSeparator("\n").withHeader());
-      try (var items = reader.readValues(uncompressed)) {
-        while (items.hasNext()) {
-          @SuppressWarnings("unchecked") Map<String, String> next = (Map<String, String>) items.next();
-          int z = Integer.parseInt(next.get("z"));
-          int x = Integer.parseInt(next.get("x"));
-          int y = Integer.parseInt(next.get("y"));
-          int hilbert = Integer.parseInt(next.get("hilbert"));
-          assertEquals(hilbert, TileCoord.ofXYZ(x, y, z).hilbertEncoded());
-          assertTrue(Integer.parseInt(next.get("z")) <= 14, "bad z: " + next);
-        }
+      for (var row : rows) {
+        int z = (int) row.get("z");
+        int x = (int) row.get("x");
+        int y = (int) row.get("y");
+        int hilbert = (int) row.get("hilbert");
+        assertEquals(hilbert, TileCoord.ofXYZ(x, y, z).hilbertEncoded());
+        assertTrue(z <= 14, "bad z: " + row);
       }
 
       // ensure tilestats standalone executable produces same output
-      var standaloneLayerstatsOutput = tempDir.resolve("layerstats2.tsv.gz");
+      var standaloneLayerstatsOutput = tempDir.resolve("layerstats2.parquet");
       TileSizeStats.main("--input=" + outputPath, "--output=" + standaloneLayerstatsOutput);
-      byte[] standaloneData = Files.readAllBytes(standaloneLayerstatsOutput);
-      byte[] standaloneUncompressed = Gzip.gunzip(standaloneData);
-      assertEquals(
-        new String(uncompressed, StandardCharsets.UTF_8),
-        new String(standaloneUncompressed, StandardCharsets.UTF_8)
-      );
+      var standaloneRows = readParquetLayerstats(standaloneLayerstatsOutput);
+      assertEquals(rows.size(), standaloneRows.size());
+      for (int i = 0; i < rows.size(); i++) {
+        assertEquals(rows.get(i), standaloneRows.get(i), "row " + i);
+      }
     } else {
       assertFalse(Files.exists(layerstats));
     }
@@ -3306,5 +3279,32 @@ class PlanetilerTests {
   @FunctionalInterface
   private interface ReadableTileArchiveFactory {
     ReadableTileArchive create(Path p) throws IOException;
+  }
+
+  private static List<Map<String, Object>> readParquetLayerstats(Path path) throws IOException {
+    try (var stream = ParquetReader.streamContent(path.toFile(),
+      group -> new blue.strategic.parquet.Hydrator<Map<String, Object>, Map<String, Object>>() {
+        @Override
+        public Map<String, Object> start() {
+          return new java.util.LinkedHashMap<>();
+        }
+
+        @Override
+        public Map<String, Object> add(Map<String, Object> target, String heading, Object value) {
+          if (value instanceof org.apache.parquet.io.api.Binary b) {
+            target.put(heading, b.toStringUsingUTF8());
+          } else {
+            target.put(heading, value);
+          }
+          return target;
+        }
+
+        @Override
+        public Map<String, Object> finish(Map<String, Object> target) {
+          return target;
+        }
+      })) {
+      return stream.toList();
+    }
   }
 }
